@@ -221,8 +221,14 @@ jobs:
           # (.relr.dyn / RELR relocations), so host tools must use the
           # runner's own native gcc/ld regardless of what LLVM=1 defaults to.
           # CC/LD (for the actual arm64 target) stay on the toolchain via LLVM=1.
+          # fixdep etc. are built via one gcc call that compiles AND links,
+          # so HOSTLD alone is never actually invoked - gcc's internal
+          # collect2 still searches PATH for `ld` and finds the toolchain's
+          # old one first. -B/usr/bin forces gcc to look in /usr/bin for its
+          # sub-tools (ld, as, ...) before anything else, regardless of PATH.
           make O=out ARCH=arm64 LLVM=1 \
             HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld HOSTAR=/usr/bin/ar \
+            HOSTCFLAGS="-B/usr/bin" HOSTLDFLAGS="-B/usr/bin" \
             olddefconfig
 
       # Kconfig dependency resolution can silently DROP an option we asked
@@ -267,6 +273,7 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           make O=out ARCH=arm64 LLVM=1 \
             HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld HOSTAR=/usr/bin/ar \
+            HOSTCFLAGS="-B/usr/bin" HOSTLDFLAGS="-B/usr/bin" \
             -j"$(nproc)"
 
           if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
