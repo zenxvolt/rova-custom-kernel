@@ -34,27 +34,23 @@ env:
 jobs:
   build-kernel:
     name: Build Kernel for Rova
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
-    
+
     steps:
       - name: Setup Build Environment
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex \
-            git gnupg gperf liblz4-tool libncurses5-dev libsdl1.2-dev \
-            libxml2 libxml2-utils lzop pngcrush schedtool squashfs-tools \
-            xsltproc zip zlib1g-dev lib32ncurses5-dev lib32z1-dev \
-            python3 python3-pip device-tree-compiler libfdt-dev \
-            libelf-dev libssl-dev libbpf-dev
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends             bc bison build-essential ccache curl flex git             libncurses5-dev libssl-dev lzop python3 zip             ca-certificates gnupg
           mkdir -p ${{ env.OUT_DIR }}
+          echo "Setup complete in $(($(date +%s) - $(date +%s --date='1 minute ago')))s"
 
       - name: Clone Kernel Source
         run: |
           git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} kernel
           cd kernel
-          echo "Kernel source cloned at: $(pwd)"
           echo "Latest commit: $(git log --oneline -1)"
 
       - name: Setup Proton Clang Toolchain
@@ -64,36 +60,25 @@ jobs:
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git proton-clang
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 aarch64-gcc
           git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 arm-gcc
-          echo "Toolchain setup complete"
 
       - name: Integrate KernelSU-Next
         run: |
           cd kernel
-          echo "::group::Installing KernelSU-Next (${{ env.KSU_BRANCH }})"
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s ${{ env.KSU_BRANCH }}
-          echo "::endgroup::"
 
       - name: Apply Droidspaces Kernel Patches
         run: |
           cd kernel
-          echo "::group::Downloading Droidspaces non-GKI patches"
-          curl -L -o /tmp/ds_patch_01.patch \
-            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
-          curl -L -o /tmp/ds_patch_02.patch \
-            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
-          echo "::endgroup::"
-          
-          echo "::group::Applying patches"
-          patch -p1 --forward < /tmp/ds_patch_01.patch || echo "Patch 1 may already be applied"
-          patch -p1 --forward < /tmp/ds_patch_02.patch || echo "Patch 2 may already be applied"
-          echo "::endgroup::"
+          curl -fsSL -o /tmp/ds_01.patch             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
+          curl -fsSL -o /tmp/ds_02.patch             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
+          patch -p1 --forward < /tmp/ds_01.patch || echo "Patch 1 skipped/already applied"
+          patch -p1 --forward < /tmp/ds_02.patch || echo "Patch 2 skipped/already applied"
 
-      - name: Configure Kernel (Defconfig + Droidspaces + KernelSU)
+      - name: Configure Kernel
         run: |
           cd kernel
           make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
-          
-          echo "::group::Applying Droidspaces config fragments"
+
           cat << 'EOF' > /tmp/droidspaces.config
           # KernelSU-Next
           CONFIG_KSU=y
@@ -101,8 +86,7 @@ jobs:
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
-          
-          # Droidspaces Mandatory
+          # Droidspaces
           CONFIG_PID_NS=y
           CONFIG_UTS_NS=y
           CONFIG_IPC_NS=y
@@ -145,45 +129,24 @@ jobs:
           CONFIG_FW_LOADER_USER_HELPER=y
           CONFIG_FW_LOADER_COMPRESS=y
           EOF
-          
+
           ./scripts/kconfig/merge_config.sh -m ${{ env.OUT_DIR }}/.config /tmp/droidspaces.config
           make O=${{ env.OUT_DIR }} ARCH=${{ env.ARCH }} olddefconfig
-          echo "::endgroup::"
-          
-          echo "::group::Verifying key configs"
+
+          echo "=== Key Config Verification ==="
           for cfg in CONFIG_KSU CONFIG_PID_NS CONFIG_UTS_NS CONFIG_IPC_NS CONFIG_USER_NS CONFIG_NET_NS CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_DEVTMPFS CONFIG_VETH CONFIG_ANDROID_PARANOID_NETWORK; do
-            grep "^${cfg}=" ${{ env.OUT_DIR }}/.config || grep "^# ${cfg} is not set" ${{ env.OUT_DIR }}/.config || echo "${cfg}=NOT_FOUND"
+            grep -E "^${cfg}=[yn]|^# ${cfg} is not set" ${{ env.OUT_DIR }}/.config || echo "${cfg}=NOT_FOUND"
           done
-          echo "::endgroup::"
 
       - name: Build Kernel
         run: |
           cd kernel
-          TC_PATH="${{ github.workspace }}/toolchain/proton-clang/bin"
-          GCC64_PATH="${{ github.workspace }}/toolchain/aarch64-gcc/bin"
-          GCC32_PATH="${{ github.workspace }}/toolchain/arm-gcc/bin"
-          export PATH="${TC_PATH}:${GCC64_PATH}:${GCC32_PATH}:${PATH}"
-          
-          echo "::group::Toolchain versions"
-          clang --version | head -1
-          aarch64-linux-android-gcc --version | head -1
-          echo "::endgroup::"
-          
-          echo "::group::Building kernel..."
-          make -j$(nproc --all) O=${{ env.OUT_DIR }} \
-            ARCH=${{ env.ARCH }} \
-            CC=clang \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            KCFLAGS="-Wno-error" \
-            2>&1 | tee ${{ env.OUT_DIR }}/build.log
-          echo "::endgroup::"
+          export PATH="${{ github.workspace }}/toolchain/proton-clang/bin:${{ github.workspace }}/toolchain/aarch64-gcc/bin:${{ github.workspace }}/toolchain/arm-gcc/bin:${PATH}"
+
+          echo "Clang: $(clang --version | head -1)"
+          echo "GCC: $(aarch64-linux-android-gcc --version | head -1)"
+
+          make -j$(nproc --all) O=${{ env.OUT_DIR }}             ARCH=${{ env.ARCH }}             CC=clang             AR=llvm-ar             NM=llvm-nm             OBJCOPY=llvm-objcopy             OBJDUMP=llvm-objdump             STRIP=llvm-strip             CROSS_COMPILE=aarch64-linux-android-             CROSS_COMPILE_ARM32=arm-linux-androideabi-             CLANG_TRIPLE=aarch64-linux-gnu-             KCFLAGS="-Wno-error"             2>&1 | tee ${{ env.OUT_DIR }}/build.log
 
       - name: Check Build Output
         run: |
@@ -192,31 +155,17 @@ jobs:
             echo "::error::Kernel image not found!"
             exit 1
           fi
-          echo "Kernel image size: $(ls -lh $IMAGE | awk '{print $5}')"
+          echo "Kernel size: $(ls -lh $IMAGE | awk '{print $5}')"
           echo "KERNEL_IMAGE=$IMAGE" >> $GITHUB_ENV
 
       - name: Setup AnyKernel3
         run: |
           git clone --depth=1 ${{ env.ANYKERNEL_REPO }} anykernel
           cd anykernel
-          
+
           cat << 'EOF' > anykernel.sh
-          # AnyKernel3 Omni Script for Rova (Redmi 4A/5A)
-          properties() { \
-          kernel.string=KernelSU-Next + Droidspaces for Rova by GitHub Actions; \
-          do.devicecheck=1; \
-          do.modules=0; \
-          do.systemless=1; \
-          do.cleanup=1; \
-          do.cleanuponabort=0; \
-          device.name1=rova; \
-          device.name2=rolex; \
-          device.name3=riva; \
-          device.name4=Mi439; \
-          supported.versions=11 - 14; \
-          supported.patchlevels=; \
-          ; \
-          }
+          # AnyKernel3 for Rova (Redmi 4A/5A)
+          properties() {           kernel.string=KernelSU-Next + Droidspaces for Rova;           do.devicecheck=1;           do.modules=0;           do.systemless=1;           do.cleanup=1;           do.cleanuponabort=0;           device.name1=rova;           device.name2=rolex;           device.name3=riva;           device.name4=Mi439;           supported.versions=11 - 14;           supported.patchlevels=;           ;           }
           block=/dev/block/bootdevice/by-name/boot;
           is_slot_device=0;
           ramdisk_compression=auto;
@@ -225,12 +174,12 @@ jobs:
           dump_boot;
           write_boot;
           EOF
-          
+
           cp ${{ env.KERNEL_IMAGE }} .
           zip -r9 ${{ github.workspace }}/KernelSU-Next-Droidspaces-Rova.zip * -x .git README.md *placeholder
           echo "ZIP_PATH=${{ github.workspace }}/KernelSU-Next-Droidspaces-Rova.zip" >> $GITHUB_ENV
 
-      - name: Upload Build Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-rova-ksu-droidspaces
@@ -238,7 +187,6 @@ jobs:
             ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb
             ${{ env.ZIP_PATH }}
             ${{ env.OUT_DIR }}/.config
-            ${{ env.OUT_DIR }}/build.log
 
       - name: Create Release
         if: github.event.inputs.release_tag != ''
@@ -248,14 +196,10 @@ jobs:
           name: KernelSU-Next + Droidspaces for Rova ${{ github.event.inputs.release_tag }}
           body: |
             ## KernelSU-Next + Droidspaces for Redmi 4A/5A (Rova)
-            **Build Info:**
-            - Device: Xiaomi Redmi 4A/5A (rova/rolex/riva)
+            - Device: rova / rolex / riva / Mi439
             - Kernel: 4.9 (crDroid 13 base)
-            - KernelSU-Next Branch: `${{ env.KSU_BRANCH }}`
-            - Droidspaces: Full namespace & cgroup support enabled
-          files: |
-            ${{ env.ZIP_PATH }}
-          draft: false
-          prerelease: false
+            - KSU-Next Branch: `${{ env.KSU_BRANCH }}`
+            - Droidspaces: Full namespace & cgroup support
+          files: ${{ env.ZIP_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
